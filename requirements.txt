@@ -1,0 +1,5 @@
+cdsapi
+numpy
+pandas
+plotly
+fire

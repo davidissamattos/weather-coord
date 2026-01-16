@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "weather-cli-era5"
+version = "0.1.0"
+description = "CLI to download ERA5 point data and plot 2m temperature"
+readme = "README.md"
+authors = [{name = "Your Name"}]
+requires-python = ">=3.9"
+dependencies = [
+    "cdsapi",
+    "numpy",
+    "pandas",
+    "plotly",
+    "fire",
+]
+
+[project.scripts]
+weather = "weather_cli.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
