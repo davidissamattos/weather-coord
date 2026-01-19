@@ -1,6 +1,9 @@
 """Download helpers for ERA5 land point time-series data."""
 from __future__ import annotations
 
+import csv
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import List, Tuple
 
@@ -128,3 +131,136 @@ def download_timeseries(dataset_path: Path, lat: float, lon: float) -> None:
     print(f"Requesting ERA5-Land time-series for lat={lat}, lon={lon} -> {target_path} ...")
     client.retrieve(DATASET, request_body, str(target_path))
     print(f"Saved dataset to {target_path}")
+
+
+def _dataset_path(data_dir: Path, name: str, country_code: str, lat: float, lon: float) -> Path:
+    return data_dir / f"{slugify(name)}_{country_code}_{lat:.2f}_{lon:.2f}.zip"
+
+
+def _read_bulk_rows(csv_path: Path) -> list[dict[str, str]]:
+    if not csv_path.exists():
+        raise SystemExit(f"CSV not found: {csv_path}")
+
+    with csv_path.open(newline="", encoding="utf-8") as fp:
+        reader = csv.DictReader(fp)
+        if reader.fieldnames is None:
+            raise SystemExit("CSV is missing a header row.")
+
+        header_map = {name.strip().lower(): name for name in reader.fieldnames}
+        required = {"name", "country", "lat", "lon"}
+        if not required.issubset(header_map):
+            missing = required - set(header_map)
+            raise SystemExit(f"CSV missing required columns: {', '.join(sorted(missing))}")
+
+        rows: list[dict[str, str]] = []
+        for row in reader:
+            rows.append({key: row[header_map[key]].strip() for key in required})
+        return rows
+
+
+def download_single_location(
+    data_dir: Path,
+    name: str,
+    lat: float | None,
+    lon: float | None,
+    country: str | None,
+    find_city: str | None = None,
+    find_country: str | None = None,
+    cache_lock: threading.Lock | None = None,
+) -> None:
+    from .process_data import cache_location_timeseries, validate_coordinates  # lazy import to avoid circular
+
+    resolved_lat = lat
+    resolved_lon = lon
+    country_code: str | None = None
+
+    if find_city:
+        resolved_lat, resolved_lon, country_code = geocode_city(find_city, country=find_country or country)
+
+    if resolved_lat is None or resolved_lon is None:
+        raise SystemExit("Latitude and longitude are required unless using --find-city/--find-country.")
+
+    validate_coordinates(resolved_lat, resolved_lon)
+    lat_f = round(float(resolved_lat), 2)
+    lon_f = round(float(resolved_lon), 2)
+    if country_code is None:
+        country_code = resolve_country_code(country, lat=lat_f, lon=lon_f)
+
+    ds_path = _dataset_path(data_dir, name, country_code, lat_f, lon_f)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    if ds_path.exists():
+        print(f"Skipping {name}: already present at {ds_path}")
+        return
+
+    download_timeseries(ds_path, lat=lat_f, lon=lon_f)
+    print("Download complete. Processing and caching...")
+
+    if cache_lock:
+        with cache_lock:
+            cache_location_timeseries(data_dir, name=name, dataset_path=ds_path)
+    else:
+        cache_location_timeseries(data_dir, name=name, dataset_path=ds_path)
+    print("Cached processed data.")
+
+
+def bulk_download_from_csv(
+    data_dir: Path,
+    csv_path: Path,
+    max_workers: int = 5,
+    dry_run: bool = False,
+) -> None:
+    rows = _read_bulk_rows(csv_path)
+    if not rows:
+        print("No rows found in CSV; nothing to do.")
+        return
+
+    if dry_run:
+        for row in rows:
+            cmd = [
+                "weather",
+                "download",
+                "--name",
+                row["name"],
+                "--country",
+                row["country"],
+                "--lat",
+                row["lat"],
+                "--lon",
+                row["lon"],
+            ]
+            print("DRY RUN:", " ".join(cmd))
+        return
+
+    print(f"Starting bulk downloads for {len(rows)} cities with up to {max_workers} workers...")
+    cache_lock = threading.Lock()
+
+    def worker(entry: dict[str, str]):
+        try:
+            download_single_location(
+                data_dir=data_dir,
+                name=entry["name"],
+                lat=float(entry["lat"]),
+                lon=float(entry["lon"]),
+                country=entry["country"],
+                cache_lock=cache_lock,
+            )
+            return (entry, None)
+        except SystemExit as exc:
+            return (entry, str(exc))
+        except Exception as exc:  # pragma: no cover - safety net
+            return (entry, f"Unexpected error: {exc}")
+
+    failures: list[tuple[dict[str, str], str]] = []
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(worker, row): row for row in rows}
+        for future in as_completed(futures):
+            entry, err = future.result()
+            if err:
+                failures.append((entry, err))
+
+    if failures:
+        print(f"Completed with {len(failures)} failure(s):")
+        for entry, err in failures:
+            print(f"- {entry['name']} ({entry['country']} {entry['lat']},{entry['lon']}): {err}")
+    else:
+        print("All bulk downloads finished successfully.")

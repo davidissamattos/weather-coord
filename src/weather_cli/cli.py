@@ -15,16 +15,10 @@ from itertools import cycle
 
 import fire
 
-from .download import (
-    DATA_FOLDER_NAME,
-    download_timeseries,
-    geocode_city,
-    resolve_country_code,
-    slugify,
-)
+from .download import DATA_FOLDER_NAME, bulk_download_from_csv, download_single_location, download_timeseries, slugify
 from .report_aggregate import render_aggregate_report
 from .list import list_downloads
-from .process_data import cache_location_timeseries, get_cached_location_timeseries, validate_coordinates
+from .process_data import get_cached_location_timeseries
 from .refresh_db import refresh_database
 from .report import render_report
 
@@ -87,9 +81,6 @@ class Weather:
 
         print(f"Wrote CDS/ADS token to {target}")
 
-    def _dataset_path(self, name: str, country_code: str, lat: float, lon: float) -> Path:
-        return self.data_dir / f"{slugify(name)}_{country_code}_{lat:.2f}_{lon:.2f}.zip"
-
     def download(
         self,
         name: str,
@@ -98,6 +89,10 @@ class Weather:
         country: str | None = None,
         find_city: str | None = None,
         find_country: str | None = None,
+        bulk: bool = False,
+        csv: str | None = None,
+        max_workers: int = 5,
+        dry_run: bool = False,
     ) -> None:
         """
         Download ERA5-Land time-series (2016-2025) for a single point with fixed variables.
@@ -106,32 +101,26 @@ class Weather:
             - Manual coordinates + country: weather download --name Gothenburg --country Sweden --lat 57.7 --lon 11.97
             - Coordinates only (reverse geocode country): weather download --name Gothenburg --lat 57.7 --lon 11.97
             - Fully geocoded: weather download --name Gothenburg --find-city Gothenburg --find-country Sweden
+            - Bulk from CSV: weather download --bulk --csv ./cities.csv --max-workers 5
         """
-        resolved_lat = lat
-        resolved_lon = lon
-        country_code: str | None = None
 
-        if find_city:
-            resolved_lat, resolved_lon, country_code = geocode_city(find_city, country=find_country or country)
-
-        if resolved_lat is None or resolved_lon is None:
-            raise SystemExit("Latitude and longitude are required unless using --find-city/--find-country.")
-
-        validate_coordinates(resolved_lat, resolved_lon)
-        lat_f = round(float(resolved_lat), 2)
-        lon_f = round(float(resolved_lon), 2)
-        if country_code is None:
-            country_code = resolve_country_code(country, lat=lat_f, lon=lon_f)
-
-        ds_path = self._dataset_path(name, country_code, lat_f, lon_f)
-        self.data_dir.mkdir(parents=True, exist_ok=True)
-        if ds_path.exists():
-            print(f"Skipping {name}: already present at {ds_path}")
+        if bulk:
+            if not csv:
+                raise SystemExit("--csv is required when using --bulk")
+            csv_path = Path(csv)
+            with _spinner("Downloading bulk data..."):
+                bulk_download_from_csv(self.data_dir, csv_path, max_workers=max_workers, dry_run=dry_run)
             return
-        download_timeseries(ds_path, lat=lat_f, lon=lon_f)
-        print("Download complete. Processing and caching...")
-        cache_location_timeseries(self.data_dir, name=name, dataset_path=ds_path)
-        print("Cached processed data.")
+        with _spinner("Downloading data..."):
+            download_single_location(
+                data_dir=self.data_dir,
+                name=name,
+                lat=lat,
+                lon=lon,
+                country=country,
+                find_city=find_city,
+                find_country=find_country,
+            )
 
     def save(
         self,
@@ -190,8 +179,8 @@ class Weather:
             agg_slug = slugify("-".join(names))
             plot_path = self.data_dir / f"{agg_slug}.html"
             with _spinner("Generating aggregated data report..."):
-                    dfs = [get_cached_location_timeseries(self.data_dir, name=n) for n in names]
-                    render_aggregate_report(dfs, names, weight_vals, output_html=plot_path, auto_open=open_browser)
+                dfs = [get_cached_location_timeseries(self.data_dir, name=n) for n in names]
+                render_aggregate_report(dfs, names, weight_vals, output_html=plot_path, auto_open=open_browser)
             print(f"Saved aggregated plot to {plot_path}")
             return
 
@@ -210,6 +199,10 @@ class Weather:
         """Rebuild the sqlite cache from all downloaded datasets."""
         with _spinner("Refreshing database..."):
             refresh_database(self.data_dir)
+
+    def _dataset_path(self, name: str, country_code: str, lat: float, lon: float) -> Path:
+        """Internal helper kept for test compatibility."""
+        return self.data_dir / f"{slugify(name)}_{country_code}_{lat:.2f}_{lon:.2f}.zip"
 
 
 def main(argv: Sequence[str] | None = None) -> None:

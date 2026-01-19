@@ -27,7 +27,7 @@ def _read_rows(csv_path: Path) -> list[dict[str, str]]:
 
         # Normalize headers
         header_map = {name.strip().lower(): name for name in reader.fieldnames}
-        required = {"name", "country", "lat", "lon"}
+        required = {"name", "country", "latitude", "longitude"}
         if not required.issubset(header_map):
             missing = required - set(header_map)
             raise SystemExit(f"CSV missing required columns: {', '.join(sorted(missing))}")
@@ -47,9 +47,9 @@ def _build_command(entry: dict[str, str]) -> list[str]:
         "--country",
         entry["country"],
         "--lat",
-        entry["lat"],
+        entry["latitude"],
         "--lon",
-        entry["lon"],
+        entry["longitude"],
     ]
 
 
