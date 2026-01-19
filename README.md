@@ -3,11 +3,19 @@ CLI for downloading ERA5 single-level data and generating reports.
 
 ## Install
 
+Install with pip
+
+```
+pip install weather-cli-era5
+```
+
+Local installation from the repository
+
 ```
 pip install .
 ```
 
-Or for local dev:
+Or for local installation in editable mode (for development):
 
 ```
 pip install -e .
@@ -106,6 +114,7 @@ Reprocesses all downloaded ZIP/CSV files into the SQLite cache (useful after sch
 
 ### Notes
 
+- A download for a specific location takes approximately 30s
 - Datasets are stored in `.weather_era5/` under your home directory by default; a SQLite cache (`weather.sqlite`) powers `report`, `save`, and `list`.
-- Downloads are global (1h cadence) and can take several minutes per variable/year.
 - `save` and `report` read only from the cache; run `download` (or `refresh-database` if you already have ZIP/CSV files) first.
+
