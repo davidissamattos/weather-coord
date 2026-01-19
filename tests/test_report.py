@@ -5,6 +5,7 @@ import plotly.graph_objects as go
 import pytest
 
 from weather_cli import report
+from weather_cli import report_func
 
 
 def sample_df():
@@ -26,12 +27,23 @@ def test_create_summary_table():
     assert isinstance(fig, go.Figure)
     assert any(isinstance(tr, go.Table) for tr in fig.data)
     headers = fig.data[0].header.values
-    assert "Mean" in headers
+    assert "Median" in headers
 
 
-def test_temperature_climatology_band():
+def test_summary_table_skips_non_numeric():
     df = sample_df()
-    fig = report.create_temperature_climatology(df, "Site")
+    df["heat_index_classification"] = ["Normal"] * len(df)
+
+    fig = report.create_summary_table(df)
+    assert isinstance(fig, go.Figure)
+    table = next(tr for tr in fig.data if isinstance(tr, go.Table))
+    variables = table.cells.values[0]
+    assert all(v != "heat_index_classification" for v in variables)
+
+
+def test_temperature_band():
+    df = sample_df()
+    fig = report.create_temperature_band(df, "Site")
     assert isinstance(fig, go.Figure)
     assert len(fig.data) == 3  # min band, max band, mean line
 
@@ -43,11 +55,11 @@ def test_temperature_histogram():
     assert any(isinstance(tr, go.Histogram) for tr in fig.data)
 
 
-def test_daily_radiation_max():
+def test_daily_radiation_band():
     df = sample_df()
-    fig = report.create_daily_radiation_max(df, "Site")
+    fig = report.create_daily_radiation_band(df, "Site")
     assert isinstance(fig, go.Figure)
-    assert len(fig.data) == 2  # solar + thermal
+    assert len(fig.data) == 6  # solar band (3) + thermal band (3)
 
 
 def test_daily_precipitation_band():
@@ -72,8 +84,7 @@ def test_write_static_page(tmp_path, monkeypatch):
 def test_render_report(tmp_path, monkeypatch):
     df = sample_df()
     out = tmp_path / "report.html"
-    monkeypatch.setattr(report.webbrowser, "open", lambda *_args, **_kwargs: None)
-    report.render_report(df, name="City", output_html=out, auto_open=True)
+    report.render_report(df, name="City", output_html=out, auto_open=False)
     assert out.exists()
     content = out.read_text(encoding="utf-8")
     assert "Summary" in content

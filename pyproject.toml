@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "weather-cli-era5"
-version = "0.1.0"
-description = "CLI to download ERA5 point data and plot 2m temperature"
+version = "2026.1.19.a"
+description = "CLI to download a 10-years weather data from ERA5 and process it in reports"
 readme = "README.md"
 authors = [{name = "Your Name"}]
 requires-python = ">=3.9"
@@ -15,6 +15,7 @@ dependencies = [
     "pandas",
     "plotly",
     "fire",
+    "geopy"
 ]
 
 [project.scripts]

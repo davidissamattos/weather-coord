@@ -6,17 +6,56 @@ Business logic lives in download.py, process_data.py, and report.py; this module
 from __future__ import annotations
 
 import sys
+import threading
+import time
+from contextlib import contextmanager
 from collections.abc import Sequence
 from pathlib import Path
+from itertools import cycle
 
 import fire
 
-from .download import DATA_FOLDER_NAME, download_timeseries, slugify
+from .download import (
+    DATA_FOLDER_NAME,
+    download_timeseries,
+    geocode_city,
+    resolve_country_code,
+    slugify,
+)
+from .report_aggregate import render_aggregate_report
 from .list import list_downloads
-from .process_data import load_location_timeseries, validate_coordinates
+from .process_data import cache_location_timeseries, get_cached_location_timeseries, validate_coordinates
+from .refresh_db import refresh_database
 from .report import render_report
 
 __all__ = ["Weather", "main"]
+
+
+@contextmanager
+def _spinner(message: str, interval: float = 0.1):
+    """Display a lightweight rotating spinner while work is running."""
+    stream = sys.stdout
+    stop_event = threading.Event()
+    spinner = cycle("|/-\\")
+
+    def spin() -> None:
+        while not stop_event.is_set():
+            stream.write(f"\r{message} {next(spinner)}")
+            stream.flush()
+            time.sleep(interval)
+
+    thread = threading.Thread(target=spin, daemon=True)
+    stream.write(f"{message} ")
+    stream.flush()
+    thread.start()
+    try:
+        yield
+    finally:
+        stop_event.set()
+        thread.join()
+        stream.write("\r" + " " * (len(message) + 2) + "\r")
+        stream.flush()
+        print(f"{message} done.")
 
 
 class Weather:
@@ -48,29 +87,51 @@ class Weather:
 
         print(f"Wrote CDS/ADS token to {target}")
 
-    def _dataset_path(self, name: str, lat: float, lon: float) -> Path:
-        return self.data_dir / f"{slugify(name)}_{lat:.4f}_{lon:.4f}.zip"
+    def _dataset_path(self, name: str, country_code: str, lat: float, lon: float) -> Path:
+        return self.data_dir / f"{slugify(name)}_{country_code}_{lat:.2f}_{lon:.2f}.zip"
 
     def download(
         self,
         name: str,
-        lat: float,
-        lon: float,
+        lat: float | None = None,
+        lon: float | None = None,
+        country: str | None = None,
+        find_city: str | None = None,
+        find_country: str | None = None,
     ) -> None:
         """
         Download ERA5-Land time-series (2016-2025) for a single point with fixed variables.
 
-        Example: weather download --name Gothenburg --lat 57.7 --lon 11.9
+        Examples:
+            - Manual coordinates + country: weather download --name Gothenburg --country Sweden --lat 57.7 --lon 11.97
+            - Coordinates only (reverse geocode country): weather download --name Gothenburg --lat 57.7 --lon 11.97
+            - Fully geocoded: weather download --name Gothenburg --find-city Gothenburg --find-country Sweden
         """
+        resolved_lat = lat
+        resolved_lon = lon
+        country_code: str | None = None
 
-        validate_coordinates(lat, lon)
-        ds_path = self._dataset_path(name, lat, lon)
+        if find_city:
+            resolved_lat, resolved_lon, country_code = geocode_city(find_city, country=find_country or country)
+
+        if resolved_lat is None or resolved_lon is None:
+            raise SystemExit("Latitude and longitude are required unless using --find-city/--find-country.")
+
+        validate_coordinates(resolved_lat, resolved_lon)
+        lat_f = round(float(resolved_lat), 2)
+        lon_f = round(float(resolved_lon), 2)
+        if country_code is None:
+            country_code = resolve_country_code(country, lat=lat_f, lon=lon_f)
+
+        ds_path = self._dataset_path(name, country_code, lat_f, lon_f)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         if ds_path.exists():
             print(f"Skipping {name}: already present at {ds_path}")
             return
-        download_timeseries(ds_path, lat=lat, lon=lon)
-        print("Download complete.")
+        download_timeseries(ds_path, lat=lat_f, lon=lon_f)
+        print("Download complete. Processing and caching...")
+        cache_location_timeseries(self.data_dir, name=name, dataset_path=ds_path)
+        print("Cached processed data.")
 
     def save(
         self,
@@ -82,31 +143,73 @@ class Weather:
 
         Example: weather save --name Gothenburg --output ./gothenburg.csv
         """
-
-        df = load_location_timeseries(self.data_dir, name=name)
-
-        out_path = Path(output) if output else self.data_dir / f"{slugify(name)}.csv"
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        df.to_csv(out_path, index=True, index_label="timestamp")
+        with _spinner("Saving the data to csv..."):
+            df = get_cached_location_timeseries(self.data_dir, name=name)
+            out_path = Path(output) if output else self.data_dir / f"{slugify(name)}.csv"
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            df.to_csv(out_path, index=True, index_label="timestamp")
         print(f"Saved data to {out_path}")
 
     def report(
         self,
-        name: str,
+        name: str | Sequence[str],
         open_browser: bool = True,
+        weights: str | Sequence[str] | None = None,
     ) -> None:
         """
-        Generate HTML report (plots + summary) for a named location.
+        Generate HTML report (plots + summary) for one or more named locations.
         """
 
-        df = load_location_timeseries(self.data_dir, name=name)
-        plot_path = self.data_dir / f"{slugify(name)}.html"
-        render_report(df, name=name, output_html=plot_path, auto_open=open_browser)
+        def _parse_items(raw: str | Sequence[str] | None) -> list[str]:
+            if raw is None:
+                return []
+            if isinstance(raw, str):
+                return [part.strip() for part in raw.split(",") if part.strip()]
+            parts: list[str] = []
+            for item in raw:
+                parts.extend([part.strip() for part in str(item).split(",") if part.strip()])
+            return parts
+
+        names = _parse_items(name)
+        if not names:
+            raise SystemExit("At least one name must be provided.")
+
+        parsed_weights = _parse_items(weights)
+        if len(names) > 1 or parsed_weights:
+            if parsed_weights and len(parsed_weights) != len(names):
+                raise SystemExit("Weights count must match number of cities.")
+            if not parsed_weights:
+                weight_vals = [1.0] * len(names)
+            else:
+                weight_vals = [float(w) for w in parsed_weights]
+            total = sum(weight_vals)
+            if not total:
+                raise SystemExit("Weights must sum to a positive value.")
+            weight_vals = [w / total for w in weight_vals]
+
+            agg_slug = slugify("-".join(names))
+            plot_path = self.data_dir / f"{agg_slug}.html"
+            with _spinner("Generating aggregated data report..."):
+                    dfs = [get_cached_location_timeseries(self.data_dir, name=n) for n in names]
+                    render_aggregate_report(dfs, names, weight_vals, output_html=plot_path, auto_open=open_browser)
+            print(f"Saved aggregated plot to {plot_path}")
+            return
+
+        df = get_cached_location_timeseries(self.data_dir, name=names[0])
+        plot_path = self.data_dir / f"{slugify(names[0])}.html"
+        with _spinner("Generating data report..."):
+            render_report(df, name=names[0], output_html=plot_path, auto_open=open_browser)
         print(f"Saved plot to {plot_path}")
 
     def list(self) -> None:
         """List downloaded locations."""
-        list_downloads(self.data_dir)
+        with _spinner("Getting available data..."):
+            list_downloads(self.data_dir)
+
+    def refresh_database(self) -> None:
+        """Rebuild the sqlite cache from all downloaded datasets."""
+        with _spinner("Refreshing database..."):
+            refresh_database(self.data_dir)
 
 
 def main(argv: Sequence[str] | None = None) -> None:
