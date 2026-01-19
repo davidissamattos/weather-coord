@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "weather-cli-era5"
-version = "2026.1.19.a"
+version = "2026.1.19.b"
 description = "CLI to download a 10-years weather data from ERA5 and process it in reports"
 readme = "README.md"
-authors = [{name = "Your Name"}]
+authors = [{name = "David Issa Mattos", email ="issamattos.david@gmail.com"}]
 requires-python = ">=3.9"
 dependencies = [
     "cdsapi",
