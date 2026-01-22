@@ -1,6 +1,7 @@
 """ERA5 weather CLI package."""
 
 from .cli import Weather, main
+from .delete import delete_location
 from .download import DATA_FOLDER_NAME, VARIABLES, download_timeseries, ensure_dependencies, slugify
 from .list import list_downloads
 from .process_data import (
@@ -28,6 +29,7 @@ __all__ = [
 	"main",
 	"DATA_FOLDER_NAME",
 	"VARIABLES",
+	"delete_location",
 	"download_timeseries",
 	"ensure_dependencies",
 	"list_downloads",

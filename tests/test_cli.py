@@ -92,7 +92,7 @@ def test_report_shows_spinner_for_aggregate(tmp_path, monkeypatch, capsys):
 
     cli.report(name="A,B", open_browser=False)
 
-    assert called["message"].startswith("Generating aggregated data report")
+    assert called["message"].startswith("Generating report")
 
 
 def test_refresh_database_command(tmp_path, monkeypatch):

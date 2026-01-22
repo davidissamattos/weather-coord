@@ -133,6 +133,41 @@ def _ensure_table(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    # Create locations metadata table for fast list queries
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS locations (
+            filename TEXT NOT NULL,
+            name TEXT,
+            country TEXT,
+            latitude REAL,
+            longitude REAL,
+            PRIMARY KEY (filename, country)
+        )
+        """
+    )
+    
+    # Migrate existing weather data to locations table if locations is empty
+    location_count = conn.execute("SELECT COUNT(*) FROM locations").fetchone()[0]
+    if location_count == 0:
+        # Check if there's weather data to migrate
+        weather_count = conn.execute("SELECT COUNT(DISTINCT filename) FROM weather").fetchone()[0]
+        if weather_count > 0:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO locations (filename, name, country, latitude, longitude)
+                SELECT 
+                    filename,
+                    name,
+                    COALESCE(country, '-') AS country,
+                    MIN(latitude) AS latitude,
+                    MIN(longitude) AS longitude
+                FROM weather
+                GROUP BY filename, country
+                """
+            )
+            conn.commit()
+    
     # If an older table exists without expected columns, migrate or rebuild it.
     cols = {row[1] for row in conn.execute("PRAGMA table_info(weather)").fetchall()}
     # Migrate legacy columns (name = slug, display_name = human display)
@@ -147,7 +182,8 @@ def _ensure_table(conn: sqlite3.Connection) -> None:
     # If still missing required columns, rebuild the table (cache can be refreshed).
     required = set(DB_COLUMNS)
     if not required.issubset(cols) or "country" not in cols:
-        conn.execute("DROP TABLE weather")
+        conn.execute("DROP TABLE IF EXISTS weather")
+        conn.execute("DROP TABLE IF EXISTS locations")
         conn.execute(
             """
             CREATE TABLE weather (
@@ -170,6 +206,18 @@ def _ensure_table(conn: sqlite3.Connection) -> None:
                 heat_index_classification TEXT,
                 windspeed_ms REAL,
                 PRIMARY KEY (filename, country, timestamp)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE locations (
+                filename TEXT NOT NULL,
+                name TEXT,
+                country TEXT,
+                latitude REAL,
+                longitude REAL,
+                PRIMARY KEY (filename, country)
             )
             """
         )
@@ -241,6 +289,35 @@ def _resolve_cache_key(data_dir: Path, name: str) -> str | None:
     return row[0] if row else None
 
 
+def _validate_dataframe_integrity(df: pd.DataFrame, name: str) -> bool:
+    """Check if dataframe has valid data (non-empty and has at least one non-null value in data columns).
+    
+    Args:
+        df: Processed dataframe to validate
+        name: Location name for error messages
+        
+    Returns:
+        True if valid, False if data should be skipped
+    """
+    if df.empty:
+        return False
+    
+    # Check data columns (exclude metadata columns)
+    data_columns = [col for col in df.columns if col not in {"latitude", "longitude", "country", "filename", "name"}]
+    
+    if not data_columns:
+        return False
+    
+    # Check if at least one data column has non-null values
+    has_data = False
+    for col in data_columns:
+        if col in df.columns and df[col].notna().any():
+            has_data = True
+            break
+    
+    return has_data
+
+
 def _write_cached_timeseries(
     data_dir: Path,
     filename: str,
@@ -256,6 +333,11 @@ def _write_cached_timeseries(
         placeholders = ",".join(["?"] * len(DB_COLUMNS))
         col_names = ",".join(DB_COLUMNS)
         rows = []
+        
+        # Extract location metadata for locations table
+        lat = df["latitude"].iloc[0] if "latitude" in df.columns and not df.empty else None
+        lon = df["longitude"].iloc[0] if "longitude" in df.columns and not df.empty else None
+        
         for ts, row in df.iterrows():
             values = {
                 "filename": filename,
@@ -272,6 +354,13 @@ def _write_cached_timeseries(
             f"INSERT OR REPLACE INTO weather ({col_names}) VALUES ({placeholders})",
             rows,
         )
+        
+        # Update locations table with metadata
+        conn.execute(
+            "INSERT OR REPLACE INTO locations (filename, name, country, latitude, longitude) VALUES (?, ?, ?, ?, ?)",
+            (filename, name, country, lat, lon),
+        )
+        
         conn.commit()
 
 
@@ -339,8 +428,12 @@ def cache_location_timeseries(
     name: str,
     dataset_path: Path,
     country_code: str | None = None,
-) -> pd.DataFrame:
-    """Process a raw dataset and store it in the sqlite cache; does not read from cache."""
+) -> pd.DataFrame | None:
+    """Process a raw dataset and store it in the sqlite cache; does not read from cache.
+    
+    Returns:
+        Processed DataFrame if valid data exists, None if file contains no valid data
+    """
     if pd is None or np is None:
         raise SystemExit("Missing dependencies: pandas and numpy are required.")
 
@@ -353,10 +446,21 @@ def cache_location_timeseries(
         if derived_country:
             country_code = derived_country
 
-    raw_df = _read_csv_archive(path)
-    df = process_raw_timeseries(raw_df, country_code=country_code)
-    _write_cached_timeseries(data_dir, filename, display_name, df, country_code)
-    return df
+    try:
+        raw_df = _read_csv_archive(path)
+        df = process_raw_timeseries(raw_df, country_code=country_code)
+        
+        # Validate data integrity
+        if not _validate_dataframe_integrity(df, name):
+            print(f"Skipping '{name}': file contains no valid data (all columns empty)")
+            return None
+        
+        _write_cached_timeseries(data_dir, filename, display_name, df, country_code)
+        return df
+    except (SystemExit, Exception) as exc:
+        # Log error but don't crash - allow refresh to continue
+        print(f"Error processing '{name}': {exc}")
+        return None
 
 
 def load_location_timeseries(data_dir: Path, name: str) -> pd.DataFrame:

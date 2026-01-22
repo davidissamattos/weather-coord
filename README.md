@@ -42,11 +42,12 @@ weather configure --token <UID:APIKEY> [--url https://ads.atmosphere.copernicus.
 
 Workflow overview:
 
-- `weather download`: fetch 2016-2025 ERA5-Land point time-series (fixed variable set) for one location, with optional automatic geocoding.
+- `weather download`: fetch 2016-2025 ERA5-Land point time-series (fixed variable set) for one location, with optional automatic geocoding. Supports bulk downloads from CSV files. Validates data integrity and skips empty files.
 - `weather save`: write the processed time-series for a location (from cache) to CSV.
 - `weather report`: generate an HTML report for one location or an aggregated report across multiple locations.
-- `weather list`: list cached locations (names/country/coords from the database).
-- `weather refresh-database`: rebuild the SQLite cache from all downloaded datasets.
+- `weather list`: list cached locations (names/country/coords from the database). Supports filtering by country, coordinates, or name.
+- `weather refresh-database`: rebuild the SQLite cache from all downloaded datasets. Validates data and skips invalid files.
+- `weather delete`: remove a location from cache and filesystem.
 
 ### Commands
 
@@ -65,6 +66,26 @@ weather download --name Gothenburg --find-city Gothenburg --find-country Sweden
 ```
 
 This uses Nominatim to resolve latitude/longitude and country code; you can also provide `--find-city` alone and let reverse geocoding pick the country.
+
+**Bulk download from CSV**
+
+```bash
+weather download --bulk --csv ./cities.csv --max-workers 5
+```
+
+Download multiple locations in parallel from a CSV file. The CSV must have headers: `name`, `country`, `lat`, `lon`.
+
+Example CSV format:
+```csv
+name,country,lat,lon
+Gothenburg,SE,57.7,11.97
+Oslo,NO,59.91,10.75
+Stockholm,SE,59.33,18.07
+```
+
+Options:
+- `--max-workers`: Number of parallel downloads (default: 5)
+- `--dry-run`: Print commands without executing downloads
 
 **Save point data to CSV**
 
@@ -98,13 +119,46 @@ weather list
 
 Shows name (from the database, falling back to filename if missing), country, and coordinates for cached datasets.
 
+**Filter cached locations**
+
+```bash
+# Filter by country
+weather list --filter "country=SE"
+
+# Filter by latitude/longitude
+weather list --filter "lat > 60"
+weather list --filter "lon < 12"
+
+# Combined filters
+weather list --filter "country=SE and lat > 60"
+weather list --filter "country=SE or country=NO"
+
+# Search by name
+weather list --filter "name contains Stockholm"
+```
+
+Filter expressions support:
+- **Equality/inequality**: `country=SE`, `country!=NO`
+- **Numeric comparisons**: `lat > 60`, `lat < 65`, `lon >= 10`
+- **Text search**: `name contains Stockholm` (case-sensitive LIKE pattern)
+- **Logical operators**: `and`, `or` (can be combined)
+- **Field names**: `name`, `country`, `lat`/`latitude`, `lon`/`longitude`
+
 **Refresh the cache database**
 
 ```
 weather refresh-database
 ```
 
-Reprocesses all downloaded ZIP/CSV files into the SQLite cache (useful after schema changes or manual file edits).
+Reprocesses all downloaded ZIP/CSV files into the SQLite cache (useful after schema changes or manual file edits). Automatically skips files with no valid data and reports statistics.
+
+**Delete a location**
+
+```bash
+weather delete --name Gothenburg
+```
+
+Removes a location from both the database (weather and locations tables) and deletes the associated files from the filesystem. Works with location name or filename.
 
 ### Options (common)
 

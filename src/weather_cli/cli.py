@@ -21,6 +21,7 @@ from .list import list_downloads
 from .process_data import get_cached_location_timeseries
 from .refresh_db import refresh_database
 from .report import render_report
+from .delete import delete_location
 
 __all__ = ["Weather", "main"]
 
@@ -148,57 +149,69 @@ class Weather:
         """
         Generate HTML report (plots + summary) for one or more named locations.
         """
+        with _spinner("Generating report..."):
+            def _parse_items(raw: str | Sequence[str] | None) -> list[str]:
+                if raw is None:
+                    return []
+                if isinstance(raw, str):
+                    return [part.strip() for part in raw.split(",") if part.strip()]
+                parts: list[str] = []
+                for item in raw:
+                    parts.extend([part.strip() for part in str(item).split(",") if part.strip()])
+                return parts
 
-        def _parse_items(raw: str | Sequence[str] | None) -> list[str]:
-            if raw is None:
-                return []
-            if isinstance(raw, str):
-                return [part.strip() for part in raw.split(",") if part.strip()]
-            parts: list[str] = []
-            for item in raw:
-                parts.extend([part.strip() for part in str(item).split(",") if part.strip()])
-            return parts
+            names = _parse_items(name)
+            if not names:
+                raise SystemExit("At least one name must be provided.")
 
-        names = _parse_items(name)
-        if not names:
-            raise SystemExit("At least one name must be provided.")
+            parsed_weights = _parse_items(weights)
+            if len(names) > 1 or parsed_weights:
+                if parsed_weights and len(parsed_weights) != len(names):
+                    raise SystemExit("Weights count must match number of cities.")
+                if not parsed_weights:
+                    weight_vals = [1.0] * len(names)
+                else:
+                    weight_vals = [float(w) for w in parsed_weights]
+                total = sum(weight_vals)
+                if not total:
+                    raise SystemExit("Weights must sum to a positive value.")
+                weight_vals = [w / total for w in weight_vals]
 
-        parsed_weights = _parse_items(weights)
-        if len(names) > 1 or parsed_weights:
-            if parsed_weights and len(parsed_weights) != len(names):
-                raise SystemExit("Weights count must match number of cities.")
-            if not parsed_weights:
-                weight_vals = [1.0] * len(names)
-            else:
-                weight_vals = [float(w) for w in parsed_weights]
-            total = sum(weight_vals)
-            if not total:
-                raise SystemExit("Weights must sum to a positive value.")
-            weight_vals = [w / total for w in weight_vals]
-
-            agg_slug = slugify("-".join(names))
-            plot_path = self.data_dir / f"{agg_slug}.html"
-            with _spinner("Generating aggregated data report..."):
+                agg_slug = slugify("-".join(names))
+                plot_path = self.data_dir / f"{agg_slug}.html"
                 dfs = [get_cached_location_timeseries(self.data_dir, name=n) for n in names]
                 render_aggregate_report(dfs, names, weight_vals, output_html=plot_path, auto_open=open_browser)
-            print(f"Saved aggregated plot to {plot_path}")
-            return
+                print(f"Saved aggregated plot to {plot_path}")
+                return
 
-        df = get_cached_location_timeseries(self.data_dir, name=names[0])
-        plot_path = self.data_dir / f"{slugify(names[0])}.html"
-        with _spinner("Generating data report..."):
+            df = get_cached_location_timeseries(self.data_dir, name=names[0])
+            plot_path = self.data_dir / f"{slugify(names[0])}.html"
             render_report(df, name=names[0], output_html=plot_path, auto_open=open_browser)
-        print(f"Saved plot to {plot_path}")
+            print(f"Saved plot to {plot_path}")
 
-    def list(self) -> None:
-        """List downloaded locations."""
+    def list(self, filter: str | None = None) -> None:
+        """List downloaded locations.
+        
+        Args:
+            filter: Optional filter expression (e.g., "country=SE and lat > 60")
+        """
         with _spinner("Getting available data..."):
-            list_downloads(self.data_dir)
+            list_downloads(self.data_dir, filter_str=filter)
 
     def refresh_database(self) -> None:
         """Rebuild the sqlite cache from all downloaded datasets."""
         with _spinner("Refreshing database..."):
             refresh_database(self.data_dir)
+
+    def delete(self, name: str) -> None:
+        """Delete a location from cache and filesystem.
+        
+        Args:
+            name: Name of the location to delete
+            
+        Example: weather delete --name Gothenburg
+        """
+        delete_location(self.data_dir, name)
 
     def _dataset_path(self, name: str, country_code: str, lat: float, lon: float) -> Path:
         """Internal helper kept for test compatibility."""

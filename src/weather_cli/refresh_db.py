@@ -17,6 +17,14 @@ def refresh_database(data_dir: Path) -> None:
         print("No datasets found to refresh.")
         return
 
+    processed = 0
+    skipped = 0
     for name_slug, path in datasets:
-        cache_location_timeseries(data_dir, name_slug, dataset_path=path)
+        result = cache_location_timeseries(data_dir, name_slug, dataset_path=path)
+        if result is not None:
+            processed += 1
+        else:
+            skipped += 1
+    
     print(f"Refreshed database at {db}")
+    print(f"Processed: {processed}, Skipped (invalid/empty): {skipped}")
